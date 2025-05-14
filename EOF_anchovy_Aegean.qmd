@@ -1,0 +1,1563 @@
+---
+title: "EOF anchovy eggs0 Aegean"
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    toc-float: true
+    code-fold: true         
+    code-summary: "Hide/Show "
+    code-tools:
+      toggle: true     
+pdf_document: default    
+bibliography: references.bib
+---
+
+In this script the Empirical Orthogonal Factor (EOF) analysis is used in the N.Aegean egg data. The analysis is used to study the variance from a mean spatial distribution across time.It is a decomposition of the annual spatial patterns into spatial components constant in time and amplitudes that are variable in time. It is basically a PCA with the scope that a small number of dominant axex can be used to explain a large portion of variance in the original process.
+
+## Load libraries and data
+
+```{r,warning=F,message=F}
+
+rm(list=ls())
+#Libraries
+library(tidyverse)
+library(janitor)
+library(sf) 
+library (matrixStats) # for rowVars
+library(EchoR)
+library(sdmTMB)
+library(conflicted)
+library(writexl)
+library(readxl)
+library(GGally)
+
+conflict_prefer("select", "dplyr")
+conflict_prefer("rename", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("mutate", "dplyr")
+conflict_prefer("arrange", "dplyr")
+
+
+#Functions
+source(paste('EOF/functions_extra/blocking_functions.r',sep='')) # functions for blocking average
+#source(paste("EOF/functions_extra/pelgas_functions.r",sep=''))
+source(paste("EOF/functions_extra/eof.r",sep='')) # Martin function 
+source(paste("EOF/functions_extra/resEOF_mod_tiles.r",sep='')) # EchoR Function modified for greece as a shape file and tiled data
+source(paste("EOF/functions_extra/resEOF_mod_gr.r",sep='')) # EchoR Function modified  for greece as  a shape file
+
+
+##Maps data
+coast<- st_read("Greece_geology/Greece/land_poly_GR.gpkg",quiet = TRUE) %>%  st_transform(crs = "WGS84")
+
+rivers <- st_read("Greece_geology/Rivers/Rivers_geodatagovgr/Rivers_geodatagovgr.shp",quiet = TRUE)  %>% st_transform(crs = "WGS84")  %>%  
+  filter(ALTNAME1 %in% c("EVROS R. 1", "EVROS R. 2","NESTOS R.","STRYMONIKOU S","STRYMON R. 2","STRYMON R. 1","AXIOS R. (VARDARIS)","ALIAKMON R.","ALIAKMON R. 1","ALIAKMON R. 2","PINIOS R.", "AXIOS R. (VARDARIS)"))  
+
+isobath <- st_read("Greece_geology/Isobaths/ged_med_bathymetry/countour_gebmed.shp",quiet = TRUE) %>% filter(CONTOUR %in% c(-200,-100))  ##subset contours 200m
+isobath_type <- c( "-100" = 5,"-200"= 1) ; isobath$Isobaths<-  as.factor(isobath$CONTOUR)
+
+#Polygons
+polygones <-  st_read("Polygones/Eggs0_2003_2022_pol_per_stratum_MAF/Eggs0_2003_2022_pol_per_stratum.shp",quiet=T ) 
+pol.Str1 <- polygones %>% filter(str =="1") ;  pol.Str2 <- polygones  %>% filter(str =="2")
+```
+
+```{r,warning=F,message=F}
+#Egg data 
+data.eggs<- read_csv("Egg_Data/Eggs0_All.csv",na = c("NA")) |> janitor::clean_names() #correct the colume names  
+data.eggs<- data.eggs %>% mutate(cruise = factor(cruise), station = factor(station),stratum = factor(stratum),month = factor(month),area = factor(area)) %>% rename(Year=cruise)
+```
+
+```{r,warning=F,message=F}
+#1D environmental data
+Copernicus_1D_indexes <- read_excel("Copernicus/Copernicus_1D_indexes.xlsx") 
+Copernicus_1D_indexes_bio <- read_excel("Copernicus/Copernicus_1D_Bio_indexes.xlsx") 
+Copernicus_1D_indexes <- Copernicus_1D_indexes %>% left_join(Copernicus_1D_indexes_bio, by = c("Year", "Str"))
+Copernicus_1D_indexes$Str <-as.factor(Copernicus_1D_indexes$Str)
+Copernicus_1D_indexes <- Copernicus_1D_indexes %>%
+  select(Year,Str, matches("mean"), matches("cv"))
+
+Copernicus_1D_indexes_Str1<- Copernicus_1D_indexes %>% filter(Str==1)
+Copernicus_1D_indexes_Str2<- Copernicus_1D_indexes %>% filter(Str==2)
+```
+
+```{r,warning=F,message=F}
+#1D Population data
+Population_indexes <- read_excel("Population_parameters.xlsx") 
+
+Population_indexes_Str1<- Population_indexes %>% filter(Stratum==1)
+Population_indexes_Str2<- Population_indexes %>% filter(Stratum==2)
+Population_indexes_All <- Population_indexes %>% filter(Stratum=="All")
+
+```
+
+
+#### Row data
+
+Those are the row data of Anchovy eggs from MEDIAS GR survey for years 2003-2006, 2008, 2014, 2016, 2019, 2022. Eggs are collected using WP2 up to 100m depth, every 5nmi (9.260km) at transects with inter-transect distance of 10nmi (18.52km).
+
+eggs0_abu,eggs1_abu & sum_eggs_abu: eggs **density** (no eggs/m ^2^) for eggs day-0 (spawned the night previous of sampling (\<24h/ day sampling) , eggs day-1 and total eggs respectively.
+
+eggs0,eggs1 & sum_eggs: eggs **number** for eggs day-0,day-1 and total eggs respectively.
+
+eggs0_pres_abs: Presence/absence
+
+
+```{r}
+data.eggs_sf <- st_as_sf(data.eggs, coords = c("lon", "lat"), crs = "WGS84")
+listsvariable= c("eggs0_abu","eggs1_abu","sum_eggs_abu")
+
+for (variable in listsvariable) {
+   title <- switch(variable,
+                  "eggs0_abu"    = "Anchovy Eggs0",
+                  "eggs1_abu"    = "Anchovy Eggs1",
+                  "sum_eggs_abu" = "Anchovy Total Eggs")
+                 
+    label <- expression("Log(Eggs/m"^2*")" * "\n grays are zero")
+
+plot_eggs <- ggplot() + 
+ geom_tile(data = data.eggs, aes(lon, lat, fill = .data[[paste0(variable)]]),width = 0.3, height = 0.3) +  
+  facet_wrap(~ Year) +
+  scale_fill_viridis_c(trans = "log", na.value = "grey80",   name = expression("Log(Eggs/10m³)\n grays are zero")) +
+  geom_sf(data = coast, fill = "grey90", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim =  c(22.5, 26), ylim =  c(39, 41)) + 
+    ggtitle(title)
+  
+ print(plot_eggs)
+}
+```
+
+```{r,warning=F}
+#choose the species and variable  you are going to work with
+variable='eggs0_abu'; species='Anchovy'
+```
+
+*We need to:*
+
+-   Exclude the areas out of study (Evoikos, Chalkidiki and Stratum1 for year 2014)
+
+-   Maket the data set similar in every location; subset only the stations that are consistently sampled across year and calculate there mean coordinates.
+
+All the stations sampled in the study area across years in the same map (row data) look like that:
+
+![](images/clipboard-2564978243.png)
+
+#### Station selection
+
+```{r,fig.width = 15,fig.height = 5}
+data.eggs <- add_utm_columns(data.eggs, c("lon", "lat"), ll_crs = 4326, units = "m")%>% dplyr::rename(lon_proj = X, lat_proj = Y) #Project coordinates to m
+
+#Subset the data set; exclude Evoikos Chalkidiki and 2014 from Str1
+data.eggs<- data.eggs %>% filter(!(area== "NEvoikos")) %>% filter(!(Year == 2014 & stratum == "1")) %>% filter(!(area == "Chalkidiki")) 
+data.eggs_Str1<- data.eggs %>%  filter(stratum == "1") 
+data.eggs_Str2 <- data.eggs %>%  filter(stratum == "2") 
+
+#Estimate mean station coordinates, keep only constant stations.
+temp_Str1 <- data.eggs_Str1 %>% dplyr::select(Year,station, stratum,month,date,time,area,lon,lat, lon_proj, lat_proj,paste(variable))             
+temp_Str1 <- temp_Str1 %>% pivot_wider(names_from = Year, values_from = paste(variable))
+temp_Str1 <-temp_Str1%>% group_by(station) %>% mutate (mean_lon= mean(lon), mean_lat= mean(lat)) %>% ungroup()
+temp_Str1 <-temp_Str1%>% group_by(station) %>% mutate (mean_lon_proj= mean(lon_proj), mean_lat_proj= mean(lat_proj)) %>% ungroup()
+
+Str1 <- temp_Str1 %>% group_by(station,mean_lon,mean_lat,mean_lon_proj,mean_lat_proj) %>% summarize_at(vars(`2003`:`2022`),~mean(.,na.rm=TRUE)) %>% ungroup() %>% as.data.frame()
+Str1[Str1[,]== "NaN"] <- NA
+Str1 <-rename(Str1,"Y2003"= '2003',"Y2004"= '2004',"Y2005"='2005',"Y2006"= '2006',"Y2008"= '2008',"Y2016"= '2016',"Y2019"= '2019',"Y2022"= '2022')
+Str1_all<-Str1 %>% mutate(nyear= rowSums(!is.na(across(starts_with("Y")))))
+Str1<- na.omit(Str1_all) # keep only the stations that are consistently  sampled across years.
+df.Str1 = as.data.frame(Str1) 
+
+temp_Str2 <- data.eggs_Str2 %>% dplyr::select(Year,station, stratum,month,date,time,area,lon,lat, lon_proj, lat_proj,paste(variable))             
+temp_Str2 <- temp_Str2 %>% pivot_wider(names_from = Year, values_from = paste(variable))
+temp_Str2 <-temp_Str2%>% group_by(station) %>% mutate (mean_lon= mean(lon), mean_lat= mean(lat)) %>% ungroup()
+temp_Str2 <-temp_Str2%>% group_by(station) %>% mutate (mean_lon_proj= mean(lon_proj), mean_lat_proj= mean(lat_proj)) %>% ungroup()
+
+Str2 <- temp_Str2 %>% group_by(station,mean_lon,mean_lat,mean_lon_proj,mean_lat_proj) %>% summarize_at(vars(`2003`:`2022`),~mean(.,na.rm=TRUE)) %>% ungroup() %>% as.data.frame()
+Str2[Str2[,]== "NaN"] <- NA
+Str2 <-rename(Str2,"Y2003"= '2003',"Y2004"= '2004',"Y2005"='2005',"Y2006"= '2006',"Y2008"= '2008',"Y2014"= '2014',"Y2016"= '2016',"Y2019"= '2019',"Y2022"= '2022')
+Str2_all<-Str2 %>% mutate(nyear= rowSums(!is.na(across(starts_with("Y")))))
+Str2<- na.omit(Str2_all) # keep only the stations that are consistently  sampled across years.
+df.Str2= as.data.frame(Str2) 
+
+#The final grid
+final_grid<- data.frame( station= c(df.Str1$station,df.Str2$station),
+                         mean_lon= c(df.Str1$mean_lon ,df.Str2$mean_lon),
+                         mean_lat= c(df.Str1$mean_lat ,df.Str2$mean_lat),
+                         stratum = c(rep("1", length(df.Str1$station)),rep("2", length(df.Str2$station))))
+final_grid= inner_join(final_grid,data.eggs,by="station")%>%dplyr::select("station",  "mean_lon","mean_lat","stratum.x","area") %>% rename("stratum" = stratum.x)
+final_grid<- unique(final_grid)
+
+Str1_sf <- st_as_sf(Str1, coords = c("mean_lon", "mean_lat"), crs = "WGS84") 
+Str2_sf <- st_as_sf(Str2, coords = c("mean_lon", "mean_lat"), crs = "WGS84") 
+
+Str1_all_sf <- st_as_sf(Str1_all, coords = c("mean_lon", "mean_lat"), crs = "WGS84") 
+Str2_all_sf <- st_as_sf(Str2_all, coords = c("mean_lon", "mean_lat"), crs = "WGS84") 
+
+n_yeras<- ggplot() +
+  labs(title = "Consistent Stations Across Years", x = "Longitude", y = "Latitude") +
+  geom_sf(data = coast, fill = "grey90", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  geom_sf(data = isobath, col = "gray80", lwd = 0.5) +
+  geom_tile(data = Str1_all, aes(x = mean_lon ,
+                   y = mean_lat ,
+                   fill = nyear),
+                  width = 0.22, height =0.18)+
+    geom_tile(data = Str2_all, aes(x = mean_lon ,
+                   y = mean_lat ,
+                   fill = nyear),
+                  width = 0.22, height =0.18)+
+  scale_fill_viridis_c(name = paste0("Nyears")) + 
+  geom_sf(data = coast, fill = "grey90", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  xlim(22.5, 26) +   ylim(39, 41) +
+  theme_bw(base_size = 15) +
+  theme(panel.grid.major = element_line(color = "white"))
+
+
+cons_station<-ggplot() +
+  labs(title = "Consistent Stations Across Years", x = "Longitude", y = "Latitude") +
+  geom_sf(data = coast, fill = "grey90", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  geom_sf(data = isobath, col = "gray80", lwd = 0.5) +
+  geom_sf(data = Str1_all_sf, color = "red", shape = 19, size = 1.5) +
+  geom_sf(data = Str1_sf, color = "black", shape = 19, size = 1.5) +
+  geom_sf(data = Str2_all_sf, color = "red", shape = 19, size = 1.5) +
+  geom_sf(data = Str2_sf, color = "black", shape = 19, size = 1.5) +
+  geom_sf(data = pol.Str1, fill = NA, color = "gray40", lwd = 0.5) +
+  annotate("text", x = 24.45, y = 39.95, label = "Stratum 1", size = 5, color = "black", fontface = "bold") +
+  geom_sf(data = pol.Str2, fill = NA, color = "gray40", lwd = 0.5) +
+  annotate("text", x = 23.9, y = 39.46, label = "Stratum 2", size = 5, color = "black", fontface = "bold") +
+  xlim(22.5, 26) +   ylim(39, 41) +
+  theme_bw(base_size = 15) +
+  theme(panel.grid.major = element_line(color = "white"))
+
+print(plot_grid(n_yeras, cons_station,
+                nrow = 1, 
+                labels = c("A", "B"),
+                rel_widths = c(1,1)))
+
+```
+
+# Stratum 1
+
+Choose your region data set and the limits form your maps
+
+```{r}
+df_eggs= Str1
+df_Copernicus = Copernicus_1D_indexes_Str1 %>% filter(Year!=2014)
+df_Population =  Population_indexes_Str1  %>% filter(Year!=2014)
+map_limits <- list( x = c(23.5, 26),  y = c(39, 41))
+map_limits_m<-list(x=c(200000, 450000), y=c(4300000, 4550000))
+ tile_size <-list (width=0.25, high=0.19 )
+poly= pol.Str1
+area="Str1"
+```
+
+
+#### Rasterize your area
+
+```{r,fig.width = 15,fig.height = 5}
+df_eggs_sf <- st_as_sf(df_eggs, coords = c("mean_lon_proj", "mean_lat_proj"), remove=F,crs = 32635)  # Use your projection
+
+#Define grid cell size in m (10 x 5 nmi)
+cell_width <- 10 *1852                 #60 * cos(25)   
+cell_height <- 5*1852
+
+# Calculate bounding box and offcet  it by half a cell to center the points
+bbox <- st_bbox(df_eggs_sf)
+bbox_centered <- bbox
+bbox_centered["xmin"] <- bbox["xmin"] - (cell_width / 2)
+bbox_centered["ymin"] <- bbox["ymin"] - (cell_height/3.8) #2.5 fits better
+
+# Create the grid starting from adjusted origin
+grid <- st_make_grid(
+  df_eggs_sf,
+  cellsize = c(cell_width, cell_height),
+  offset = c(bbox_centered["xmin"], bbox_centered["ymin"]),
+  square = TRUE)
+grid_sf <- st_sf(grid_id = 1:length(grid), geometry = grid)
+
+#Spatial join the sapmitng points to grid cells
+df_eggs_grid <- st_join(df_eggs_sf, grid_sf, join = st_within)
+
+# Get centroids of grid cells
+grid_centroids <- st_centroid(grid_sf)
+df_eggs_grid <- df_eggs_grid %>%
+  left_join( data.frame(grid_id = grid_sf$grid_id, centroid_geom = st_coordinates(grid_centroids)),
+    by = "grid_id")
+
+# Step 5d: Replace geometry with centroid
+st_geometry(df_eggs_grid) <- df_eggs_grid$centroid_geom
+df_eggs_grid <- df_eggs_grid[, !sapply(df_eggs_grid, inherits, what = "sfc")]
+
+# Optional: transform to WGS84
+coast_m <- st_transform(coast, crs = 32635)
+
+#Plot
+ggplot() +
+  geom_raster(data = df_eggs_grid, aes(x=centroid_geom.X, y=centroid_geom.Y, fill =Y2022)) + #raster of your data
+  geom_point(data = df_eggs_grid, aes(x=mean_lon_proj , y=mean_lat_proj), col ="red") +          #mean coordinate of original stations
+  geom_point(data = df_eggs_grid, aes(x=centroid_geom.X, y=centroid_geom.Y)) +              # centers of the rasterized cells created 
+  geom_sf(data = grid_sf,fill=NA, color = "blue") +
+  scale_fill_viridis_c(trans="log")+
+    #  geom_sf(data = df.Str1_sf, color = "red", size = 2) +
+  theme_minimal()+
+  geom_sf(data = coast_m, fill = "grey90", col = "gray60") +
+  labs(title = "Sampling Points Centered in Grid Cells")+
+  xlim(200000, 450000) + ylim(4300000, 4550000)
+
+```
+
+
+## Mean and cv maps across years
+Lets have a look to the mean distribution of eggs and the variance of it after log transformation.
+
+```{r,fig.width = 15,fig.height = 5}
+df_eggs_grid <- df_eggs_grid %>%
+  rowwise() %>%
+  mutate(
+    mean_log_egg = mean(log(c_across(starts_with("Y"))+1), na.rm = TRUE),
+    sd_log_egg = sd(log(c_across(starts_with("Y"))+1), na.rm = TRUE),
+    cv_log_egg = ifelse((mean_log_egg == 0 & sd_log_egg==0), 0, sd_log_egg/mean_log_egg)
+  ) %>%
+  ungroup()
+
+#Characterize habitat as Unfavorable, recurrent and Occational
+median_mean <- median(df_eggs_grid$mean_log_egg)
+median_cv <- median(df_eggs_grid$sd_log_egg)
+
+df_eggs_grid <- df_eggs_grid %>%
+  mutate(habitat = ifelse(mean_log_egg < median_mean & cv_log_egg < median_cv, "Unfavorable",
+                   ifelse(mean_log_egg > median_mean & cv_log_egg < median_cv, "Reccurent",
+                   ifelse(cv_log_egg > median_cv, "Occational","NA"))))
+
+plot_mean <- 
+ ggplot() +
+  geom_raster(data = df_eggs_grid,
+               aes(x = centroid_geom.X,
+                   y = centroid_geom.Y,
+                   fill = .data[[paste0("mean_log_egg")]]))+
+scale_fill_viridis_c(name = paste0("log(Egg/m² + 1)")) + 
+  geom_sf(data = coast_m, fill = "black", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+   coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+  labs(title = paste("Mean Egg Density - ",species,"log(",variable,"+1)",sep =" "), x = "Longitude", y= "Latitude")  
+
+plot_cv <- 
+   ggplot() +
+  geom_tile(data = df_eggs_grid,
+               aes(x = centroid_geom.X,
+                   y = centroid_geom.Y,
+                   fill = .data[[paste0("cv_log_egg")]]))+
+  scale_fill_viridis_c(name = paste0("cv-log(Egg/m² + 1)")) +  
+ geom_sf(data = coast_m, fill = "black", col = "gray60") +
+ geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+  labs(title = paste("CV Egg Density - ",species,"log(",variable,"+1)",sep =" "), x = "Longitude", y= "Latitude")
+
+plot_habitat <- 
+  ggplot() +
+  geom_tile(data = df_eggs_grid,
+             aes(x =centroid_geom.X,
+                 y = centroid_geom.Y,
+                 fill = habitat))+
+  scale_fill_manual(
+    values = c("Unfavorable" = "blue", "Reccurent" = "red", "Occational" = "orange"),
+    name = "Habitat") +
+  geom_sf(data = coast_m, fill = "black", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+  labs(title = paste("Habitat Classification:", species, "log(",variable,"+1)", sep = " "),
+       x = "Longitude", y = "Latitude") 
+  
+print(plot_grid(plot_mean, plot_cv, plot_habitat,
+                nrow = 1, 
+                labels = c("A", "B","C"),
+                rel_widths = c(1, 1,1)))
+```
+
+## EOF on mean consistent stations
+
+The EOF decomposition is performed in the matrix of anomalies of the data after log(x+1) transformation. This way an annual distribution is explained as the variability around the mean map which is expressed as the sum of time-invariant spatial components that are weighted by their time-varying amplitudes:
+
+![](images/clipboard-1092048387.png)
+
+**Z(t,s)** is the variable under study at time t and spatial coordinate s
+
+**Zbar(.,s)** is the mean at each coordinate s,
+
+**Em (s)** the eigenvectors or EOFs at each spatial coordinate s, scaled to unity (principal spatial modes)
+
+**Um(t)** the EOF amplitudes (principal components) scaled to sqrt(λm),
+
+where the **λm** are the q non-null eigenvalues associated with the EOFs.
+
+To retain the most meaningful EOFs and interpret their spatial patterns, the eigenvalues (overall variance accounted for by the components) and in addition the “local” explained variance are used.The “local” explained variance at location s associated with EOF of order m, is the proportion of variance across time that Um(t)and Em(s) explain at that location. More at [@petitgas2014]
+
+### EOF based on Martin custom scripts
+
+Here the costume functions of eof.r are used. Alternative you can use the resEOF function from EchoR package (some problem with map ploting)
+
+#### Create the matrix of anomalies/residusals
+```{r}
+#Transform you data set into a matrix
+matrix_eggs_grid <- df_eggs_grid %>%
+  select(station, starts_with("Y"))
+
+matrix_eggs_grid <- t(matrix_eggs_grid[, -1])  # Exclude the first column (station) during transposition
+dim(matrix_eggs_grid)
+```
+
+```{r}
+#Transform log(x+1) transformation and residual calculation
+#EOF Code Martin/ Mathieu/ Pierre
+Y=matrix_eggs_grid  #the eggs in blocks/stations
+#x=t(Y)
+x=Y
+x <- log(1+x)  
+# x11()
+hist(x)
+dim(x) # x years and y blocks - time as row and space as columes
+
+# principal modes of variability
+isnax <- is.na(x)
+isna <- !apply(!isnax,2,sum)>0
+x[isnax] <- 0
+x.mu <- apply(x,2,mean,na.rm=T)
+x.res<-sweep(x,2,x.mu,FUN="-")
+dim(x.res)
+```
+
+#### Perform the EOF
+
+```{r}
+source(paste("EOF/functions_extra/eof.r",sep='')) # Martin function 
+eof<-eof2.f(x.res)
+summary(eof)
+
+#extract 
+eigen.EOF_res<- data.frame(EOF = c(1:7),
+                     eig= eof$stvm)
+
+scores.EOF_res <- data.frame(
+             Station = df_eggs_grid[, 1],
+             Lon     = df_eggs_grid[, 2],
+             Lat     = df_eggs_grid[, 3],
+             Lon_prj = df_eggs_grid[, 4],
+             Lat_prj = df_eggs_grid[, 5])
+             for (i in 1:7) {scores.EOF_res[[paste0("EOF_", i)]] <- eof$em[, i] }
+
+locexpvar.EOF_res <- data.frame(
+             Station = df_eggs_grid[, 1],
+             Lon     = df_eggs_grid[, 2],
+             Lat     = df_eggs_grid[, 3],
+             Lon_prj = df_eggs_grid[, 4],
+             Lat_prj = df_eggs_grid[, 5])
+  for (i in 1:7) {locexpvar.EOF_res[[paste0("EOF_", i)]] <- ifelse(is.nan(eof$lvs[, i]),NA, eof$lvs[, i])}  # those are the stations that mean and sd ==0 what should I do with them
+
+  
+ampli.EOF_res <- data.frame(Year = c("2003","2004","2005","2006","2008","2016","2019","2022"))
+                                 for (i in 1:7) {ampli.EOF_res[[paste0("EOF_", i)]] <- eof$um[, i]}
+
+# #eigenvalues of the EOF
+# head(eigen.EOF_res)
+ 
+# # EOF local variance in space (x)
+# head(locexpvar.EOF_res)
+
+# # EOF scores in space (x)
+# head(scores.EOF_res)
+ 
+# #EOFs amplitudes in time (ci)
+# head(ampli.EOF_res)
+```
+
+lda(λ): are the q non-null eigenvalues associated with the EOFs\
+Em (s): the eigenvectors or EOFs (principal spatial modes) scaled to unit\
+Um(t): the EOF amplitudes (principal components) scaled to lda\
+stvm: % of explained variance of each EOF\
+xm:\
+lvs: local explained variance
+
+#### Visualize the results
+##### % Variance explained from each EOF
+```{r}
+#jpeg(paste(path,'graphes/EOF/',species,"_explained_var.jpg",sep=""),width=6,height=6,res=200,units="in")
+barplot(eigen.EOF_res$eig,main="% of explained variance",ylim=c(0,0.4),xlim=c(0,8),  names.arg = seq_along(eigen.EOF_res$eig))
+#dev.off()
+```
+
+##### EOFs, local explained variance and amplitudes vs time
+
+```{r,fig.width = 15,fig.height = 8}
+#Plot: for each of the first 4 EOFs:
+Lab.palette <- colorRampPalette(c("blue", "green", "yellow", "red"), space = "Lab")
+mpalette=rev(brewer.pal(n = 10, name = "RdBu"))
+
+for(i in 1:5){
+  scores.EOF_res <- scores.EOF_res %>%
+    mutate(
+      !!paste0("Magnitude_EOF", i) := abs(.data[[paste0("EOF_", i)]]),
+      !!paste0("Sign_EOF", i) := ifelse(.data[[paste0("EOF_", i)]] >= 0, "Positive", "Negative") 
+    )
+}
+
+for (i in 1:3) {
+  #Bobble map
+ # EOF_map<- ggplot(scores.EOF_res) +
+ #   geom_sf(data = st_as_sf(coast), fill = "grey85", color = "gray50") +
+ #   geom_sf(data = st_as_sf(isobath), color = "gray90", size = 0.5) +
+ #   geom_sf(data = st_as_sf(rivers), color = "gray50", size = 0.8) +
+ #   geom_point(aes(x = mean_lon ,
+ #                  y = mean_lat ,
+ #                  size = .data[[paste0("Magnitude_EOF", i)]],
+ #                  color = .data[[paste0("Sign_EOF", i)]]), 
+ #                  shape = 21) + 
+ #   scale_color_manual( name = "Sign", values = c("Positive" = "red", "Negative" = "blue")) +   # Customize color 
+ #   scale_size_continuous( name = "Magnitude", range = c(0,8))+   # Customize size scale
+ #   coord_sf(xlim = map_limits$x, ylim = map_limits$y) + 
+ #   labs(title = paste("EOF",i," (",round(eigen.EOF_res$eig[i]*100),"%)",sep=""),x = "Longitude",y = "Latitude") +
+ #   theme_bw() +
+ #   theme(panel.grid.major = element_line(color = "white"))
+
+plot_mean <- 
+ ggplot() +
+  geom_tile(data = df_eggs_grid,
+               aes(x = mean_lon ,
+                   y = mean_lat ,
+                   fill = .data[[paste0("mean_log_egg")]]),
+                  width = tile_size$width, height = tile_size$high)+
+scale_fill_viridis_c(name = paste0("log(Egg/m² + 1)")) + 
+  geom_sf(data = coast, fill = "black", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+   coord_sf(xlim = map_limits$x, ylim = map_limits$y) + 
+  labs(title = paste("Mean Egg Density - ",species,"log(",variable,"+1)",sep =" "), x = "Longitude", y= "Latitude")
+
+
+#color map
+ EOF_map<- ggplot() +
+  geom_tile(data = scores.EOF_res,
+               aes(x = mean_lon,
+                   y = mean_lat,
+                  fill = .data[[paste0("EOF_", i,sep="")]]),
+                  width = tile_size$width, height = tile_size$high)+
+   scale_fill_viridis_c() +  
+   geom_sf(data = coast, fill = "black", col = "gray60") +
+   geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+   coord_sf(xlim = map_limits$x, ylim = map_limits$y) + 
+   labs(title = paste("EOF",i," (",round(eigen.EOF_res$eig[i]*100),"%)",sep=""),x = "Longitude",y = "Latitude") 
+
+ 
+# #Bobble map
+# Var_map<- ggplot(locexpvar.EOF_res) +
+#   geom_sf(data = st_as_sf(coast), fill = "grey85", color = "gray50") +
+#   geom_sf(data = st_as_sf(isobath), color = "gray90", size = 0.5) +
+#   geom_sf(data = st_as_sf(rivers), color = "gray50", size = 0.8) +
+#  geom_point(aes(x = mean_lon ,
+#                 y = mean_lat ,
+#                 size = .data[[paste0("EOF_", i)]]),
+#                 shape = 21) + 
+#   scale_size_continuous( name = "%", range = c(0,8))+   # Customize size scale
+#   coord_sf(xlim = map_limits$x, ylim = map_limits$y) + 
+#   labs(title = (paste("Local explained variance of EOF",i,sep="")),x = "Longitude",y = "Latitude") +
+#   theme_bw() +
+#   theme(panel.grid.major = element_line(color = "white"))
+
+
+# #Colored map
+ Var_map<-  ggplot() +
+      geom_tile(data = locexpvar.EOF_res,
+               aes(x = mean_lon,
+                   y = mean_lat,
+                 fill = .data[[paste0("EOF_", i)]]),
+                  width = tile_size$width, height = tile_size$high)+
+   scale_fill_gradientn(colours = mpalette,name="%")+
+   geom_sf(data = coast, fill = "black", col = "gray60") +
+   geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+   coord_sf(xlim = map_limits$x, ylim = map_limits$y) + 
+   labs(title = (paste("Local explained variance of EOF",i,sep="")),x = "Longitude",y = "Latitude") 
+
+ 
+ampli <- ggplot(ampli.EOF_res, aes(x = Year, y = .data[[paste0("EOF_", i)]], group = 1)) +
+    geom_point() +
+    geom_line() +
+    labs(title = paste("EOF",i),x = "Year",y = "Amplitude") 
+ 
+print(plot_grid(plot_mean,Var_map, EOF_map, ampli, 
+                nrow = 2, align ="hv",
+                labels = c("A", "B", "C","D"),
+                rel_widths = c(1,1,1,1)))
+
+}  
+
+```
+
+**Local explained variance for stations been constant zeros is NaN. Should I set is zero?**
+
+### EOF based on EchoR
+
+The all the analysis is done inside the function (residuals calculation including). We just need data set in a df long raster like format
+
+I modified the script to use imported coast of Greece.
+
+```{r}
+#Transform my data in log format
+df_eggs_grid <- df_eggs_grid %>%
+  pivot_longer(
+    cols = starts_with("Y"),
+    names_to = "Year",
+    names_prefix = "Y",
+    values_to = paste(variable)
+  ) %>%
+  mutate(
+    Year = as.integer(Year)
+    )  
+
+df_eggs_grid <- df_eggs_grid %>%
+  mutate(!!paste0("log_", variable,sep="") := log(.data[[variable]] + 1))
+
+df_eggs_grid<-df_eggs_grid %>% rename(Cell=station,lon= centroid_geom.X,lat=centroid_geom.Y) %>% select(Year, lon, lat, Cell,paste(variable), paste("log_", variable,sep=""))
+
+df_eggs_grid<-as.data.frame(df_eggs_grid)
+```
+
+```{r,fig.width = 15,fig.height = 4}
+# EchoR scripted modified incited of geom_raster use geom_tile
+source(paste("EOF/functions_extra/resEOF_mod_gr.r",sep='')) # EchoR Function modified
+coast=coast_m
+map_limits=map_limits_m
+res_eof<- resEOF(df=df_eggs_grid ,  #  make sure data set is df not tibble   
+                     xname='lon',yname='lat',
+                     zname= paste("log_", variable,sep=""),
+                     tname='Year',
+                     nEOF=3,
+                     path.export.results= paste0("EOF/",area,sep=""),
+                     addinverse.eof=NULL,
+                     nsp= paste(species), 
+                     signif.thr=0.5,
+                     plot.all=F) #error if it is turned to T??
+
+coast <- st_transform(coast_m, crs = "WGS84")
+
+#Amplitudes
+ampli.EOF_res <- data.frame(Year = c("2003","2004","2005","2006","2008","2016","2019","2022"))
+                                 for (i in 1:7) {ampli.EOF_res[[paste0("EOF_", i)]] <- res_eof$df.eof.Um[, i]}
+
+#EOFs
+Em.EOF_res <- as.data.frame(res_eof$df.eof.Em)
+Em.EOF_res$ID <- rownames(res_eof$df.eof.Em)
+rownames(Em.EOF_res) <- NULL
+Em.EOF_res <- Em.EOF_res[, c(ncol(Em.EOF_res), 1:(ncol(Em.EOF_res)-1))]
+Em.EOF_res$ID <- gsub("resid.", "", Em.EOF_res$ID)
+Em.EOF_res <- separate(Em.EOF_res, ID, into = c("lon", "lat"), sep = "-")
+Em.EOF_res$lon <- as.numeric(Em.EOF_res$lon) ;Em.EOF_res$lat <- as.numeric(Em.EOF_res$lat)
+colnames(Em.EOF_res)[3:9] <- paste0("EOF_", 1:7)
+
+#scores
+eof_cols <- paste0("EOF_", 1:3)
+results <- list()
+
+for (i in 1:nrow(ampli.EOF_res)) {
+  year <- ampli.EOF_res$Year[i]
+  amplitudes <- ampli.EOF_res[i, eof_cols]
+  
+  df_score <- Em.EOF_res[,c("lon","lat",paste0("EOF_", 1:3))]
+  for (eof in eof_cols) {
+    df_score[[eof]] <- Em.EOF_res[[eof]] * amplitudes[[eof]]
+  }
+   df_score$Year <- year
+  
+  # Store the result in the list
+  results[[i]] <- df_score
+}
+
+scores.EOF_res <- do.call(rbind, results)
+
+write_xlsx(ampli.EOF_res, paste0("EOF/",area,"amplitudes",".xlsx",sep=""))
+write_xlsx(Em.EOF_res, paste0("EOF/",area,"EOFs",".xlsx",sep=""))
+write_xlsx(scores.EOF_res, paste0("EOF/",area,"scores",".xlsx",sep=""))
+```
+
+
+```{r}
+# Plot spatio-temporal variation of EOF1
+mpalette=rev(brewer.pal(n = 10, name = "RdBu"))
+
+for (eof in eof_cols) {
+plot_scores<- 
+   ggplot() + 
+   geom_raster(data = scores.EOF_res, aes(lon, lat, fill = .data[[paste0(eof)]])) +  
+  facet_wrap(~ Year) +
+  scale_fill_gradientn(colours = mpalette, name= paste0(eof))+
+  geom_sf(data = coast_m, fill = "grey90", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+    ggtitle("Spatiotemporal variations from mean map" )
+
+  print(plot_scores)
+  }    
+```
+
+## Amplitudes vs 1D Enviromental
+```{r,message=F}
+ampli.EOF_res<-ampli.EOF_res %>%select(Year, paste("EOF_",1:2,sep=""))
+df_Copernicus
+
+Ampli_cor <- merge(ampli.EOF_res,df_Copernicus,by = "Year") %>% select (-Str)
+
+variable="Temperature"
+ggpairs(Ampli_cor[,c(2:3,4:9)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,27:32)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+
+variable="Salinity"
+ggpairs(Ampli_cor[,c(2:3,10:14)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,33:37)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+
+variable="Stratification"
+ggpairs(Ampli_cor[,c(2:3,15:20)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,38:43)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+
+variable="Primaty Production"
+ggpairs(Ampli_cor[,c(2:3,21:26)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,44:49)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+```
+
+## Amplitudes vs 1D Population
+```{r,message=F}
+ampli.EOF_res<-ampli.EOF_res %>%select(Year, paste("EOF_",1:2,sep=""))
+df_Population
+
+Ampli_cor <- merge(ampli.EOF_res,df_Population,by = "Year") %>% select (-Stratum)
+ 
+variable="DPEM Parameters"
+ggpairs(Ampli_cor[,c(2:3,5:10)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "eggs"))
+ggpairs(Ampli_cor[,c(2:3,4,11:16)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "adults"))
+```
+## Comments
+
+The 3 first EOFs explain ~60% of the total variation.
+The EOF1 (explaining almost 30%) spatial pattern depicts that a significant part of the variation (local explained variance>50%) is located in Lemnons island - area with low mean values characterized as occasional habitat.However, this pattern seams to be mostly driven form year 2022 where extreme high values present shoth of Limnos island (area usual with zeros)..
+
+The other EOFs steal explain a quite significant part of the total variation (>10%) however the do not have an significant spatial stracture.
+
+
+# Stratum 1 != 2022
+What does EOF says if you remove the Y2022
+Choose your region data set and the limits form your maps
+
+```{r}
+df_eggs= Str1 %>% select(-Y2022)
+df_Copernicus = Copernicus_1D_indexes_Str1 %>% filter(Year!= 2014) %>% filter(Year!= 2022)
+df_Population =  Population_indexes_Str1  %>% filter(Year!=2014)  %>% filter(Year!= 2022)
+map_limits <- list( x = c(23.5, 26),  y = c(39, 41))
+map_limits_m<-list(x=c(200000, 450000), y=c(4300000, 4550000))
+poly= pol.Str1
+tile_size <-list (width=0.25, high=0.19 )
+area="Str1 !=2022"
+```
+
+
+#### Rasterize your area
+
+```{r,fig.width = 15,fig.height = 5}
+df_eggs_sf <- st_as_sf(df_eggs, coords = c("mean_lon_proj", "mean_lat_proj"), remove=F,crs = 32635)  # Use your projection
+
+#Define grid cell size in m (10 x 5 nmi)
+cell_width <- 10 *1852                 #60 * cos(25)   
+cell_height <- 5*1852
+
+# Calculate bounding box and offcet  it by half a cell to center the points
+bbox <- st_bbox(df_eggs_sf)
+bbox_centered <- bbox
+bbox_centered["xmin"] <- bbox["xmin"] - (cell_width / 2)
+bbox_centered["ymin"] <- bbox["ymin"] - (cell_height/3.8) #2.5 fits better
+
+# Create the grid starting from adjusted origin
+grid <- st_make_grid(
+  df_eggs_sf,
+  cellsize = c(cell_width, cell_height),
+  offset = c(bbox_centered["xmin"], bbox_centered["ymin"]),
+  square = TRUE)
+grid_sf <- st_sf(grid_id = 1:length(grid), geometry = grid)
+
+#Spatial join the sapmitng points to grid cells
+df_eggs_grid <- st_join(df_eggs_sf, grid_sf, join = st_within)
+
+# Get centroids of grid cells
+grid_centroids <- st_centroid(grid_sf)
+df_eggs_grid <- df_eggs_grid %>%
+  left_join( data.frame(grid_id = grid_sf$grid_id, centroid_geom = st_coordinates(grid_centroids)),
+    by = "grid_id")
+
+# Step 5d: Replace geometry with centroid
+st_geometry(df_eggs_grid) <- df_eggs_grid$centroid_geom
+df_eggs_grid <- df_eggs_grid[, !sapply(df_eggs_grid, inherits, what = "sfc")]
+
+# Optional: transform to WGS84
+coast_m <- st_transform(coast, crs = 32635)
+
+#Plot
+ggplot() +
+  geom_raster(data = df_eggs_grid, aes(x=centroid_geom.X, y=centroid_geom.Y, fill =Y2019)) + #raster of your data
+  geom_point(data = df_eggs_grid, aes(x=mean_lon_proj , y=mean_lat_proj), col ="red") +          #mean coordinate of original stations
+  geom_point(data = df_eggs_grid, aes(x=centroid_geom.X, y=centroid_geom.Y)) +              # centers of the rasterized cells created 
+  geom_sf(data = grid_sf,fill=NA, color = "blue") +
+  scale_fill_viridis_c(trans="log")+
+    #  geom_sf(data = df.Str1_sf, color = "red", size = 2) +
+  theme_minimal()+
+  geom_sf(data = coast_m, fill = "grey90", col = "gray60") +
+  labs(title = "Sampling Points Centered in Grid Cells")+
+  xlim(200000, 450000) + ylim(4300000, 4550000)
+
+
+```
+
+
+## Mean and cv maps across years
+
+Lets have a look to the mean distribution of eggs and the variance of it after log transformation.
+
+```{r,fig.width = 15,fig.height = 5}
+df_eggs_grid <- df_eggs_grid %>%
+  rowwise() %>%
+  mutate(
+    mean_log_egg = mean(log(c_across(starts_with("Y"))+1), na.rm = TRUE),
+    sd_log_egg = sd(log(c_across(starts_with("Y"))+1), na.rm = TRUE),
+    cv_log_egg = ifelse((mean_log_egg == 0 & sd_log_egg==0), 0, sd_log_egg/mean_log_egg)
+  ) %>%
+  ungroup()
+
+#Characterize habitat as Unfavorable, recurrent and Occational
+median_mean <- median(df_eggs_grid$mean_log_egg)
+median_cv <- median(df_eggs_grid$sd_log_egg)
+
+df_eggs_grid <- df_eggs_grid %>%
+  mutate(habitat = ifelse(mean_log_egg < median_mean & cv_log_egg < median_cv, "Unfavorable",
+                   ifelse(mean_log_egg > median_mean & cv_log_egg < median_cv, "Reccurent",
+                   ifelse(cv_log_egg > median_cv, "Occational","NA"))))
+
+plot_mean <- 
+ ggplot() +
+  geom_raster(data = df_eggs_grid,
+               aes(x = centroid_geom.X,
+                   y = centroid_geom.Y,
+                   fill = .data[[paste0("mean_log_egg")]]))+
+scale_fill_viridis_c(name = paste0("log(Egg/m² + 1)")) + 
+  geom_sf(data = coast_m, fill = "black", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+   coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+  labs(title = paste("Mean Egg Density - ",species,"log(",variable,"+1)",sep =" "), x = "Longitude", y= "Latitude")  
+
+plot_cv <- 
+   ggplot() +
+  geom_tile(data = df_eggs_grid,
+               aes(x = centroid_geom.X,
+                   y = centroid_geom.Y,
+                   fill = .data[[paste0("cv_log_egg")]]))+
+  scale_fill_viridis_c(name = paste0("cv-log(Egg/m² + 1)")) +  
+ geom_sf(data = coast_m, fill = "black", col = "gray60") +
+ geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+  labs(title = paste("CV Egg Density - ",species,"log(",variable,"+1)",sep =" "), x = "Longitude", y= "Latitude")
+
+plot_habitat <- 
+  ggplot() +
+  geom_tile(data = df_eggs_grid,
+             aes(x =centroid_geom.X,
+                 y = centroid_geom.Y,
+                 fill = habitat))+
+  scale_fill_manual(
+    values = c("Unfavorable" = "blue", "Reccurent" = "red", "Occational" = "orange"),
+    name = "Habitat") +
+  geom_sf(data = coast_m, fill = "black", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+  labs(title = paste("Habitat Classification:", species, "log(",variable,"+1)", sep = " "),
+       x = "Longitude", y = "Latitude") 
+  
+print(plot_grid(plot_mean, plot_cv, plot_habitat,
+                nrow = 1, 
+                labels = c("A", "B","C"),
+                rel_widths = c(1, 1,1)))
+```
+
+## EOF on mean consistent stations
+
+The EOF decomposition is performed in the matrix of anomalies of the data after log(x+1) transformation. This way an annual distribution is explained as the variability around the mean map which is expressed as the sum of time-invariant spatial components that are weighted by their time-varying amplitudes:
+
+![](images/clipboard-1092048387.png)
+
+**Z(t,s)** is the variable under study at time t and spatial coordinate s
+
+**Zbar(.,s)** is the mean at each coordinate s,
+
+**Em (s)** the eigenvectors or EOFs at each spatial coordinate s, scaled to unity (principal spatial modes)
+
+**Um(t)** the EOF amplitudes (principal components) scaled to sqrt(λm),
+
+where the **λm** are the q non-null eigenvalues associated with the EOFs.
+
+To retain the most meaningful EOFs and interpret their spatial patterns, the eigenvalues (overall variance accounted for by the components) and in addition the “local” explained variance are used.The “local” explained variance at location s associated with EOF of order m, is the proportion of variance across time that Um(t)and Em(s) explain at that location. More at [@petitgas2014]
+
+### EOF based on EchoR
+
+The all the analysis is done inside the function (residuals calculation including). We just need data set in a df long raster like format
+
+I modified the script so coast of Greece is used.
+
+```{r}
+#Transform my data in log format
+df_eggs_grid <- df_eggs_grid %>%
+  pivot_longer(
+    cols = starts_with("Y"),
+    names_to = "Year",
+    names_prefix = "Y",
+    values_to = paste(variable)
+  ) %>%
+  mutate(
+    Year = as.integer(Year)
+    )  
+
+df_eggs_grid <- df_eggs_grid %>%
+  mutate(!!paste0("log_", variable,sep="") := log(.data[[variable]] + 1))
+
+df_eggs_grid<-df_eggs_grid %>% rename(Cell=station,lon= centroid_geom.X,lat=centroid_geom.Y) %>% select(Year, lon, lat, Cell,paste(variable), paste("log_", variable,sep=""))
+
+df_eggs_grid<-as.data.frame(df_eggs_grid)
+```
+
+```{r,fig.width = 15,fig.height = 4}
+# EchoR scriped modified insted of geom_raster use geom_tile
+source(paste("EOF/functions_extra/resEOF_mod_gr.r",sep='')) # EchoR Function modified
+coast=coast_m
+map_limits=map_limits_m
+res_eof<- resEOF(df=df_eggs_grid ,  #  make sure data set is df not tibble   
+                     xname='lon',yname='lat',
+                     zname= paste("log_", variable,sep=""),
+                     tname='Year',
+                     nEOF=3,
+                     path.export.results= paste0("EOF/",area,sep=""),
+                     addinverse.eof=NULL,
+                     nsp= paste(species), 
+                     signif.thr=0.5,
+                     plot.all=F) #error if it is turned to T??
+
+coast <- st_transform(coast_m, crs = "WGS84")
+
+#Amplitudes
+ampli.EOF_res <- data.frame(Year = c("2003","2004","2005","2006","2008","2016","2019"))
+                                 for (i in 1:6) {ampli.EOF_res[[paste0("EOF_", i)]] <- res_eof$df.eof.Um[, i]}
+
+#EOFs
+Em.EOF_res <- as.data.frame(res_eof$df.eof.Em)
+Em.EOF_res$ID <- rownames(res_eof$df.eof.Em)
+rownames(Em.EOF_res) <- NULL
+Em.EOF_res <- Em.EOF_res[, c(ncol(Em.EOF_res), 1:(ncol(Em.EOF_res)-1))]
+Em.EOF_res$ID <- gsub("resid.", "", Em.EOF_res$ID)
+Em.EOF_res <- separate(Em.EOF_res, ID, into = c("lon", "lat"), sep = "-")
+Em.EOF_res$lon <- as.numeric(Em.EOF_res$lon) ;Em.EOF_res$lat <- as.numeric(Em.EOF_res$lat)
+colnames(Em.EOF_res)[3:8] <- paste0("EOF_", 1:6)
+
+#scores
+eof_cols <- paste0("EOF_", 1:3)
+results <- list()
+
+for (i in 1:nrow(ampli.EOF_res)) {
+  year <- ampli.EOF_res$Year[i]
+  amplitudes <- ampli.EOF_res[i, eof_cols]
+  
+  df_score <- Em.EOF_res[,c("lon","lat",paste0("EOF_", 1:3))]
+  for (eof in eof_cols) {
+    df_score[[eof]] <- Em.EOF_res[[eof]] * amplitudes[[eof]]
+  }
+   df_score$Year <- year
+  
+  # Store the result in the list
+  results[[i]] <- df_score
+}
+
+scores.EOF_res <- do.call(rbind, results)
+
+write_xlsx(ampli.EOF_res, paste0("EOF/",area,"amplitudes",".xlsx",sep=""))
+write_xlsx(Em.EOF_res, paste0("EOF/",area,"EOFs",".xlsx",sep=""))
+write_xlsx(scores.EOF_res, paste0("EOF/",area,"scores",".xlsx",sep=""))
+
+```
+
+```{r}
+# Plot spatio-temporal variation of EOF1
+mpalette=rev(brewer.pal(n = 10, name = "RdBu"))
+
+for (eof in eof_cols) {
+plot_scores<- 
+   ggplot() + 
+   geom_raster(data = scores.EOF_res, aes(lon, lat, fill = .data[[paste0(eof)]])) +  
+  facet_wrap(~ Year) +
+  scale_fill_gradientn(colours = mpalette, name= paste0(eof))+
+  geom_sf(data = coast_m, fill = "grey90", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+    ggtitle("Spatiotemporal variations from mean map" )
+
+  print(plot_scores)
+      }
+```
+
+
+
+## Amplitudes vs 1D Enviromental
+```{r,message=F}
+ampli.EOF_res<-ampli.EOF_res %>%select(Year, paste("EOF_",1:2,sep=""))
+df_Copernicus
+
+Ampli_cor <- merge(ampli.EOF_res,df_Copernicus,by = "Year") %>% select (-Str)
+
+variable="Temperature"
+ggpairs(Ampli_cor[,c(2:3,4:9)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,27:32)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+
+variable="Salinity"
+ggpairs(Ampli_cor[,c(2:3,10:14)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,33:37)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+
+variable="Stratification"
+ggpairs(Ampli_cor[,c(2:3,15:20)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,38:43)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+
+variable="Primaty Production"
+ggpairs(Ampli_cor[,c(2:3,21:26)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,44:49)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+```
+
+
+## Amplitudes vs 1D Population
+```{r,message=F}
+ampli.EOF_res<-ampli.EOF_res %>%select(Year, paste("EOF_",1:2,sep=""))
+df_Population
+
+Ampli_cor <- merge(ampli.EOF_res,df_Population,by = "Year") %>% select (-Stratum)
+ 
+variable="DPEM Parameters"
+ggpairs(Ampli_cor[,c(2:3,5:10)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "eggs"))
+ggpairs(Ampli_cor[,c(2:3,4,11:16)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "adults"))
+```
+
+## Comments
+The First EOF of the reduced data set is similar to EOF1 of the full data set.
+
+
+# Stratum 2
+Choose you data set and the limits form your maps
+
+```{r}
+df_eggs= Str2
+df_Copernicus = Copernicus_1D_indexes_Str2
+df_Population =  Population_indexes_Str2
+map_limits <- list(x = c(22.5, 24), y = c(39, 41))
+map_limits_m<- list(x=c(100000, 340000), y=c(4300000, 4550000))
+area= "Str2"
+tile_size <-list (width=0.25, high=0.19 )
+```
+
+#### Rasterize your area
+
+```{r,fig.width = 15,fig.height = 5}
+df_eggs_sf <- st_as_sf(df_eggs, coords = c("mean_lon_proj", "mean_lat_proj"), remove=F,crs = 32635)  # Use your projection
+
+#Define grid cell size in m (10 x 5 nmi)
+cell_width <- 10 *1852                 #60 * cos(25)   
+cell_height <- 5*1852
+
+# Calculate bounding box and offcet  it by half a cell to center the points
+bbox <- st_bbox(df_eggs_sf)
+bbox_centered <- bbox
+bbox_centered["xmin"] <- bbox["xmin"] - (cell_width / 2)
+bbox_centered["ymin"] <- bbox["ymin"] - (cell_height/2) #2.5 fits better
+
+# Create the grid starting from adjusted origin
+grid <- st_make_grid(
+  df_eggs_sf,
+  cellsize = c(cell_width, cell_height),
+  offset = c(bbox_centered["xmin"], bbox_centered["ymin"]),
+  square = TRUE)
+grid_sf <- st_sf(grid_id = 1:length(grid), geometry = grid)
+
+#Spatial join the sapmitng points to grid cells
+df_eggs_grid <- st_join(df_eggs_sf, grid_sf, join = st_within)
+
+# Get centroids of grid cells
+grid_centroids <- st_centroid(grid_sf)
+df_eggs_grid <- df_eggs_grid %>%
+  left_join( data.frame(grid_id = grid_sf$grid_id, centroid_geom = st_coordinates(grid_centroids)),
+    by = "grid_id")
+
+# Step 5d: Replace geometry with centroid
+st_geometry(df_eggs_grid) <- df_eggs_grid$centroid_geom
+df_eggs_grid <- df_eggs_grid[, !sapply(df_eggs_grid, inherits, what = "sfc")]
+
+# Optional: transform to WGS84
+coast_m <- st_transform(coast, crs = 32635)
+
+#Plot
+ggplot() +
+  geom_raster(data = df_eggs_grid, aes(x=centroid_geom.X, y=centroid_geom.Y, fill =Y2022)) + #raster of your data
+  geom_point(data = df_eggs_grid, aes(x=mean_lon_proj , y=mean_lat_proj), col ="red") +          #mean coordinate of original stations
+  geom_point(data = df_eggs_grid, aes(x=centroid_geom.X, y=centroid_geom.Y)) +              # centers of the rasterized cells created 
+  geom_sf(data = grid_sf,fill=NA, color = "blue") +
+  scale_fill_viridis_c(trans="log")+
+    #  geom_sf(data = df.Str1_sf, color = "red", size = 2) +
+  theme_minimal()+
+  geom_sf(data = coast_m, fill = "black", col = "gray60") +
+  labs(title = "Sampling Points Centered in Grid Cells")+
+  xlim(100000, 340000) + ylim(4300000, 4550000)
+
+
+```
+
+## Mean and cv maps across years
+
+Lets have a look to the mean distribution of eggs and the variance of it after log transformation.
+```{r,fig.width = 15,fig.height = 5}
+df_eggs_grid <- df_eggs_grid %>%
+  rowwise() %>%
+  mutate(
+    mean_log_egg = mean(log(c_across(starts_with("Y"))+1), na.rm = TRUE),
+    sd_log_egg = sd(log(c_across(starts_with("Y"))+1), na.rm = TRUE),
+    cv_log_egg = ifelse((mean_log_egg == 0 & sd_log_egg==0), 0, sd_log_egg/mean_log_egg)
+  ) %>%
+  ungroup()
+
+#Characterize habitat as Unfavorable, recurrent and Occational
+median_mean <- median(df_eggs_grid$mean_log_egg)
+median_cv <- median(df_eggs_grid$sd_log_egg)
+
+df_eggs_grid <- df_eggs_grid %>%
+  mutate(habitat = ifelse(mean_log_egg <= median_mean & cv_log_egg < median_cv, "Unfavorable",
+                   ifelse(mean_log_egg >= median_mean & cv_log_egg < median_cv, "Reccurent",
+                   ifelse(cv_log_egg > median_cv, "Occational","NA"))))
+
+plot_mean <- 
+ ggplot() +
+  geom_raster(data = df_eggs_grid,
+               aes(x = centroid_geom.X,
+                   y = centroid_geom.Y,
+                   fill = .data[[paste0("mean_log_egg")]]))+
+  scale_fill_viridis_c(name = paste0("log(Egg/m² + 1)")) + 
+  geom_sf(data = coast_m, fill = "black", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+   coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+  labs(title = paste("Mean Egg Density - ",species,"log(",variable,"+1)",sep =" "), x = "Longitude", y= "Latitude")  
+
+plot_cv <- 
+   ggplot() +
+  geom_raster(data = df_eggs_grid,
+               aes(x = centroid_geom.X,
+                   y = centroid_geom.Y,
+                   fill = .data[[paste0("cv_log_egg")]]))+
+                scale_fill_viridis_c(name = paste0("cv-log(Egg/m² + 1)")) +  
+ geom_sf(data = coast_m, fill = "black", col = "gray60") +
+ geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+  labs(title = paste("CV Egg Density - ",species,"log(",variable,"+1)",sep =" "), x = "Longitude", y= "Latitude")
+
+plot_habitat <- 
+  ggplot() +
+  geom_raster(data = df_eggs_grid,
+             aes(x = centroid_geom.X,
+                 y = centroid_geom.Y,
+                 fill = habitat))+
+  scale_fill_manual(
+    values = c("Unfavorable" = "blue", "Reccurent" = "red", "Occational" = "orange"),
+    name = "Habitat") +
+  geom_sf(data = coast_m, fill = "black", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+  labs(title = paste("Habitat Classification:", species, "log(",variable,"+1)", sep = " "),
+       x = "Longitude", y = "Latitude") 
+  
+print(plot_grid(plot_mean, plot_cv, plot_habitat,
+                nrow = 1, 
+                labels = c("A", "B","C"),
+                rel_widths = c(1, 1,1)))
+```
+
+## EOF on mean consistent stations
+
+The EOF decomposition is performed in the matrix of anomalies of the data after log(x+1) transformation. This way an annual distribution is explained as the variability around the mean map which is expresed as the sum of time-invariant spatial components that are weighted by their time-varying amplitudes:
+
+![](images/clipboard-1092048387.png)
+
+**Z(t,s)** is the variable under study at time t and spatial coordinate s
+
+**Zbar(.,s)** is the mean at each coordinate s,
+
+**Em (s)** the eigenvectors or EOFs at each spatial coordinate s, scaled to unity (principal spatial modes)
+
+**Um(t)** the EOF amplitudes (principal components) scaled to sqrt(λm),
+
+where the **λm** are the q non-null eigenvalues associated with the EOFs.
+
+To retain the most meaningful EOFs and interpret their spatial patterns, the eigenvalues (overall variance accounted for by the components) and in addition the “local” explained variance are used.The “local” explained variance at location s associated with EOF of order m, is the proportion of variance across time that Um(t)and Em(s) explain at that location. More at [@petitgas2014]
+
+### EOF based on EchoR
+
+The all the analysis is done inside the function (residuals calculation including). We just need data set in a df long format.
+Modified version of resEOF EcohR is used for ploting greece.
+
+```{r}
+#Transform my data in log format
+df_eggs_grid <- df_eggs_grid %>%
+  pivot_longer(
+    cols = starts_with("Y"),
+    names_to = "Year",
+    names_prefix = "Y",
+    values_to = paste(variable)
+  ) %>%
+  mutate(
+    Year = as.integer(Year)
+    )  
+
+df_eggs_grid <- df_eggs_grid %>%
+  mutate(!!paste0("log_", variable,sep="") := log(.data[[variable]] + 1))
+
+df_eggs_grid<-df_eggs_grid %>% rename(Cell=station,lon= centroid_geom.X ,lat=centroid_geom.Y) %>% select(Year, lon, lat, Cell,paste(variable), paste("log_", variable,sep=""))
+
+df_eggs_grid<-as.data.frame(df_eggs_grid)
+```
+
+```{r,fig.width = 15,fig.height = 4}
+source(paste("EOF/functions_extra/resEOF_mod_gr.r",sep='')) # EchoR Function modified
+coast=coast_m
+map_limits=map_limits_m
+res_eof<- resEOF(df=df_eggs_grid ,  #  make sure data set is df not tibble   
+                     xname='lon',yname='lat',
+                     zname= paste("log_", variable,sep=""),
+                     tname='Year',
+                     nEOF=3,
+                     path.export.results= paste0("EOF/",area,sep=""),
+                     addinverse.eof=NULL,
+                     nsp= paste(species), 
+                     signif.thr=0.5,
+                     plot.all=F) #error if it is turned to T??
+
+coast <- st_transform(coast_m, crs = "WGS84")
+
+#Amplitudes
+ampli.EOF_res <- data.frame(Year = c("2003","2004","2005","2006","2008","2014","2016","2019","2022"))
+                                 for (i in 1:8) {ampli.EOF_res[[paste0("EOF_", i)]] <- res_eof$df.eof.Um[, i]}
+
+#EOFs
+Em.EOF_res <- as.data.frame(res_eof$df.eof.Em)
+Em.EOF_res$ID <- rownames(res_eof$df.eof.Em)
+rownames(Em.EOF_res) <- NULL
+Em.EOF_res <- Em.EOF_res[, c(ncol(Em.EOF_res), 1:(ncol(Em.EOF_res)-1))]
+Em.EOF_res$ID <- gsub("resid.", "", Em.EOF_res$ID)
+Em.EOF_res <- separate(Em.EOF_res, ID, into = c("lon", "lat"), sep = "-")
+Em.EOF_res$lon <- as.numeric(Em.EOF_res$lon) ;Em.EOF_res$lat <- as.numeric(Em.EOF_res$lat)
+colnames(Em.EOF_res)[3:10] <- paste0("EOF_", 1:8)
+
+#scores
+eof_cols <- paste0("EOF_", 1:3)
+results <- list()
+
+for (i in 1:nrow(ampli.EOF_res)) {
+  year <- ampli.EOF_res$Year[i]
+  amplitudes <- ampli.EOF_res[i, eof_cols]
+  
+  df_score <- Em.EOF_res[,c("lon","lat",paste0("EOF_", 1:3))]
+  for (eof in eof_cols) {
+    df_score[[eof]] <- Em.EOF_res[[eof]] * amplitudes[[eof]]
+  }
+   df_score$Year <- year
+  
+  # Store the result in the list
+  results[[i]] <- df_score
+}
+
+scores.EOF_res <- do.call(rbind, results)
+
+write_xlsx(ampli.EOF_res, paste0("EOF/",area,"amplitudes",".xlsx",sep=""))
+write_xlsx(Em.EOF_res, paste0("EOF/",area,"EOFs",".xlsx",sep=""))
+write_xlsx(scores.EOF_res, paste0("EOF/",area,"scores",".xlsx",sep=""))
+
+```
+
+```{r}
+# Plot spatio-temporal variation of EOF1
+mpalette=rev(brewer.pal(n = 10, name = "RdBu"))
+
+for (eof in eof_cols) {
+plot_scores<- 
+   ggplot() + 
+   geom_raster(data = scores.EOF_res, aes(lon, lat, fill = .data[[paste0(eof)]])) +  
+  facet_wrap(~ Year) +
+  scale_fill_gradientn(colours = mpalette, name= paste0(eof))+
+  geom_sf(data = coast_m, fill = "grey90", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits_m$x, ylim = map_limits_m$y) + 
+    ggtitle("Spatiotemporal variations from mean map" )
+
+  print(plot_scores)
+}
+
+```
+
+## Amplitudes vs 1D Enviromental
+```{r,message=F}
+ampli.EOF_res<-ampli.EOF_res %>%select(Year, paste("EOF_",1:2,sep=""))
+df_Copernicus
+
+Ampli_cor <- merge(ampli.EOF_res,df_Copernicus,by = "Year") %>% select (-Str)
+
+variable="Temperature"
+ggpairs(Ampli_cor[,c(2:3,4:9)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,27:32)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+
+variable="Salinity"
+ggpairs(Ampli_cor[,c(2:3,10:14)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,33:37)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+
+variable="Stratification"
+ggpairs(Ampli_cor[,c(2:3,15:20)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,38:43)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+
+variable="Primaty Production"
+ggpairs(Ampli_cor[,c(2:3,21:26)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "mean"))
+ggpairs(Ampli_cor[,c(2:3,44:49)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "cv"))
+```
+
+
+## Amplitudes vs 1D Population
+```{r,message=F}
+ampli.EOF_res<-ampli.EOF_res %>%select(Year, paste("EOF_",1:2,sep=""))
+df_Population
+
+Ampli_cor <- merge(ampli.EOF_res,df_Population,by = "Year") %>% select (-Stratum)
+ 
+variable="DPEM Parameters"
+ggpairs(Ampli_cor[,c(2:3,5:10)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "eggs"))
+ggpairs(Ampli_cor[,c(2:3,4,11:16)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "adults"))
+```
+
+
+## Comments
+
+The first EOF explains ~35% of the total variability witch is mainly located in the same areas of the mean distribution (you have the most variability inside the recurrent area).That is different from Stratum 1 and BoB- MAF maybe??
+
+# All area
+Here a tiled version of resEOF is used; for the original one I need to rasterize the hole survay.
+Choose your region data set and the limits form your maps
+
+```{r}
+#Str1$Y2014 <- NA  # Add 'Y2014' to Str1, fill it with NA
+Str2 <-  Str2 %>% select (-Y2014)
+All_area<- rbind(Str1, Str2)
+df_eggs_grid= All_area
+df_Population =  Population_indexes_All  %>% filter(Year!=2014)
+map_limits <- list( x = c(22.5, 26),  y = c(39, 41))
+area="All"
+tile_size <-list (width=0.25, high=0.19 )
+```
+
+## Mean and cv maps across years
+
+Lets have a look to the mean distribution of eggs and the variance of it after log transformation.
+```{r,fig.width = 15,fig.height = 5}
+df_eggs_grid <- df_eggs_grid %>%
+  rowwise() %>%
+  mutate(
+    mean_log_egg = mean(log(c_across(starts_with("Y"))+1), na.rm = TRUE),
+    sd_log_egg = sd(log(c_across(starts_with("Y"))+1), na.rm = TRUE),
+    cv_log_egg = ifelse((mean_log_egg == 0 & sd_log_egg==0), 0, sd_log_egg/mean_log_egg)
+  ) %>%
+  ungroup()
+
+#Characterize habitat as Unfavorable, recurrent and occational
+median_mean <- median(df_eggs_grid$mean_log_egg)
+median_cv <- median(df_eggs_grid$sd_log_egg)
+
+df_eggs_grid <- df_eggs_grid %>%
+  mutate(habitat = ifelse(mean_log_egg <= median_mean & cv_log_egg < median_cv, "Unfavorable",
+                   ifelse(mean_log_egg >= median_mean & cv_log_egg < median_cv, "Reccurent",
+                   ifelse(cv_log_egg > median_cv, "Occational","NA"))))
+
+plot_mean <- 
+ ggplot() +
+  geom_tile(data = df_eggs_grid,
+               aes(x = mean_lon ,
+                   y = mean_lat ,
+                   fill = .data[[paste0("mean_log_egg")]]),
+                  width = tile_size$width, height = tile_size$high)+
+scale_fill_viridis_c(name = paste0("log(Egg/m² + 1)")) + 
+  geom_sf(data = coast, fill = "black", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+   coord_sf(xlim = map_limits$x, ylim = map_limits$y) + 
+  labs(title = paste("Mean Egg Density - ",species,"log(",variable,"+1)",sep =" "), x = "Longitude", y= "Latitude")  
+
+plot_cv <- 
+   ggplot() +
+  geom_tile(data = df_eggs_grid,
+               aes(x = mean_lon ,
+                   y = mean_lat ,
+                   fill = .data[[paste0("cv_log_egg")]]),
+                  width = tile_size$width, height = tile_size$high)+
+scale_fill_viridis_c(name = paste0("cv-log(Egg/m² + 1)")) +  
+ geom_sf(data = coast, fill = "black", col = "gray60") +
+ geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits$x, ylim = map_limits$y) + 
+  labs(title = paste("CV Egg Density - ",species,"log(",variable,"+1)",sep =" "), x = "Longitude", y= "Latitude")
+
+plot_habitat <- 
+  ggplot() +
+  geom_tile(data = df_eggs_grid,
+             aes(x = mean_lon,
+                 y = mean_lat,
+                 fill = habitat),
+              width = tile_size$width, height = tile_size$high)+
+  scale_fill_manual(
+    values = c("Unfavorable" = "blue", "Reccurent" = "red", "Occational" = "orange"),
+    name = "Habitat") +
+  geom_sf(data = coast, fill = "black", col = "gray60") +
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits$x, ylim = map_limits$y) + 
+  labs(title = paste("Habitat Classification:", species, "log(",variable,"+1)", sep = " "),
+       x = "Longitude", y = "Latitude") 
+  
+print(plot_grid(plot_mean, plot_cv, plot_habitat,
+                nrow = 1, 
+                labels = c("A", "B","C"),
+                rel_widths = c(1, 1,1)))
+```
+
+## EOF on mean consistent stations
+
+The EOF decomposition is performed in the matrix of anomalies of the data after log(x+1) transformation. This way an annual distribution is explained as the variability around the mean map which is expresed as the sum of time-invariant spatial components that are weighted by their time-varying amplitudes:
+
+![](images/clipboard-1092048387.png)
+
+**Z(t,s)** is the variable under study at time t and spatial coordinate s
+
+**Zbar(.,s)** is the mean at each coordinate s,
+
+**Em (s)** the eigenvectors or EOFs at each spatial coordinate s, scaled to unity (principal spatial modes)
+
+**Um(t)** the EOF amplitudes (principal components) scaled to sqrt(λm),
+
+where the **λm** are the q non-null eigenvalues associated with the EOFs.
+
+To retain the most meaningful EOFs and interpret their spatial patterns, the eigenvalues (overall variance accounted for by the components) and in addition the “local” explained variance are used.The “local” explained variance at location s associated with EOF of order m, is the proportion of variance across time that Um(t)and Em(s) explain at that location. More at [@petitgas2014]
+
+### EOF based on EchoR
+
+The all the analysis is done inside the function (residuals calculation including). We just need data set in a df long format.
+
+problem with map ploting because of plot_raster() does not work in me point (they are not grided).
+
+```{r}
+#Transform my data in log format
+df_eggs_grid <- df_eggs_grid %>%
+  pivot_longer(
+    cols = starts_with("Y"),
+    names_to = "Year",
+    names_prefix = "Y",
+    values_to = paste(variable)
+  ) %>%
+  mutate(
+    Year = as.integer(Year)
+    )  
+
+df_eggs_grid <- df_eggs_grid %>%
+  mutate(!!paste0("log_", variable,sep="") := log(.data[[variable]] + 1))
+
+df_eggs_grid<-df_eggs_grid %>% rename(Cell=station,lon= mean_lon ,lat=mean_lat) %>% select(Year, lon, lat, Cell,paste(variable), paste("log_", variable,sep=""))
+
+df_eggs_grid<-as.data.frame(df_eggs_grid)
+```
+
+```{r,fig.width = 15,fig.height = 4}
+# EchoR scriped modified insted of geom_raster use geom_tile
+source(paste("EOF/functions_extra/resEOF_mod_tiles.r",sep='')) # EchoR Function modified
+ res_eof<-resEOF(df=df_eggs_grid ,  #  make sure data set is df not tibble   
+                     xname='lon',yname='lat',
+                     zname= paste("log_", variable,sep=""),
+                     tname='Year',
+                     path.export.results= paste0("EOF/",area,sep=""),
+                     nEOF=4,
+                     addinverse.eof=NULL,
+                     nsp= paste(species), 
+                     signif.thr=0.5,
+                     plot.all=F) #error if it is turned to T??
+ 
+#Amplitudes
+ampli.EOF_res <- data.frame(Year = c("2003","2004","2005","2006","2008","2016","2019","2022"))
+                                 for (i in 1:7) {ampli.EOF_res[[paste0("EOF_", i)]] <- res_eof$df.eof.Um[, i]}
+
+#EOFs
+Em.EOF_res <- as.data.frame(res_eof$df.eof.Em)
+Em.EOF_res$ID <- rownames(res_eof$df.eof.Em)
+rownames(Em.EOF_res) <- NULL
+Em.EOF_res <- Em.EOF_res[, c(ncol(Em.EOF_res), 1:(ncol(Em.EOF_res)-1))]
+Em.EOF_res$ID <- gsub("resid.", "", Em.EOF_res$ID)
+Em.EOF_res <- separate(Em.EOF_res, ID, into = c("lon", "lat"), sep = "-")
+Em.EOF_res$lon <- as.numeric(Em.EOF_res$lon) ;Em.EOF_res$lat <- as.numeric(Em.EOF_res$lat)
+colnames(Em.EOF_res)[3:9] <- paste0("EOF_", 1:7)
+
+#scores
+eof_cols <- paste0("EOF_", 1:3)
+results <- list()
+
+for (i in 1:nrow(ampli.EOF_res)) {
+  year <- ampli.EOF_res$Year[i]
+  amplitudes <- ampli.EOF_res[i, eof_cols]
+  
+  df_score <- Em.EOF_res[,c("lon","lat",paste0("EOF_", 1:3))]
+  for (eof in eof_cols) {
+    df_score[[eof]] <- Em.EOF_res[[eof]] * amplitudes[[eof]]
+  }
+   df_score$Year <- year
+  
+  # Store the result in the list
+  results[[i]] <- df_score
+}
+
+scores.EOF_res <- do.call(rbind, results)
+
+write_xlsx(ampli.EOF_res, paste0("EOF/",area,"amplitudes",".xlsx",sep=""))
+write_xlsx(Em.EOF_res, paste0("EOF/",area,"EOFs",".xlsx",sep=""))
+write_xlsx(scores.EOF_res, paste0("EOF/",area,"scores",".xlsx",sep=""))
+```
+ 
+
+```{r}
+# Plot spatio-temporal variation of EOF1
+mpalette=rev(brewer.pal(n = 10, name = "RdBu"))
+
+for (eof in eof_cols) {
+plot_scores<- 
+   ggplot() + 
+   geom_tile(data = scores.EOF_res, aes(lon, lat, fill = .data[[paste0(eof)]]),width = tile_size$width, height = tile_size$high)+
+   facet_wrap(~ Year) +
+  scale_fill_gradientn(colours = mpalette, name= paste0(eof))+
+  geom_sf(data = coast, fill = "grey90", col = "gray60")+ 
+  geom_sf(data = rivers, col = "gray50", lwd = 0.5) +
+  coord_sf(xlim = map_limits$x, ylim = map_limits$y) + 
+  ggtitle("Spatiotemporal variations from mean map" )
+
+  print(plot_scores)
+      }
+``` 
+## Amplitudes vs 1D Population
+
+
+
+```{r,message=F}
+ampli.EOF_res<-ampli.EOF_res %>%select(Year, paste("EOF_",1:2,sep=""))
+df_Population
+
+Ampli_cor <- merge(ampli.EOF_res,df_Population,by = "Year") %>% select (-Stratum)
+ 
+variable="DPEM Parameters"
+ggpairs(Ampli_cor[,c(2:3,5:10)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "eggs"))
+ggpairs(Ampli_cor[,c(2:3,4,11:16)],  diag = list(continuous = "blankDiag"),lower = list(continuous = "smooth"),title= paste(variable, "adults"))
+```
+## Comments
+The first EOF explains ~25% of the total variability however you do not have a clear pattern
+
